@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Mollie\Api\MollieApiClient;
 use Mollie\Api\Exceptions\ApiException;
+use App\Models\WebhookSuccess;
 
 class PaymentController extends Controller
 {
@@ -41,21 +42,31 @@ class PaymentController extends Controller
             $mollie = $this->getMollieClient();
 
             // Build payment payload
+            $redirectUrl = route('payment.return');
+            $webhookUrl = route('payment.webhook');
+            
             $paymentData = [
                 'amount' => [
                     'value' => number_format($validated['amount'], 2, '.', ''),
                     'currency' => config('services.mollie.currency', 'EUR'),
                 ],
                 'description' => $validated['description'],
-                'redirectUrl' => route('payment.return'),
+                'redirectUrl' => $redirectUrl,
                 'locale' => config('services.mollie.locale', 'en_US'),
             ];
 
             // Only add webhook URL if not localhost (Mollie can't reach localhost)
-            $webhookUrl = route('payment.webhook');
             if (!str_contains($webhookUrl, '127.0.0.1') && !str_contains($webhookUrl, 'localhost')) {
                 $paymentData['webhookUrl'] = $webhookUrl;
             }
+
+            // Log payment creation data for debugging
+            Log::info('Creating Mollie payment', [
+                'app_url' => config('app.url'),
+                'redirect_url' => $redirectUrl,
+                'webhook_url' => $webhookUrl,
+                'webhook_included' => isset($paymentData['webhookUrl']),
+            ]);
 
             // Create payment with Mollie SDK
             $payment = $mollie->payments->create($paymentData);
@@ -123,12 +134,23 @@ class PaymentController extends Controller
                 $payment = $mollie->payments->get($paymentId);
                 $status = $payment->status;
                 
+                // Record webhook call in database
+                WebhookSuccess::updateOrCreate(
+                    ['payment_id' => $paymentId],
+                    [
+                        'status' => $status,
+                        'webhook_data' => $request->all(),
+                        'ip_address' => $request->ip(),
+                    ]
+                );
+                
                 // Update your database with transaction status
                 // Example: Payment::where('mollie_payment_id', $paymentId)->update(['status' => $status]);
                 
-                Log::info('Mollie webhook received', [
+                Log::info('Mollie webhook received and recorded', [
                     'payment_id' => $paymentId,
                     'status' => $status,
+                    'ip' => $request->ip(),
                 ]);
             }
 

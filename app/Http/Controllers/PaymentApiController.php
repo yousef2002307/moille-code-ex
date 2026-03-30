@@ -7,6 +7,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
 use Mollie\Api\MollieApiClient;
 use Mollie\Api\Exceptions\ApiException;
+use App\Models\WebhookSuccess;
 
 class PaymentApiController extends Controller
 {
@@ -195,6 +196,16 @@ class PaymentApiController extends Controller
                 $mollie = $this->getMollieClient();
                 $payment = $mollie->payments->get($paymentId);
                 $status = $payment->status;
+                
+                // Record webhook call in database
+                WebhookSuccess::updateOrCreate(
+                    ['payment_id' => $paymentId],
+                    [
+                        'status' => $status,
+                        'webhook_data' => $request->all(),
+                        'ip_address' => $request->ip(),
+                    ]
+                );
                 
                 // Update your database with transaction status
                 // Example: Payment::where('mollie_payment_id', $paymentId)->update(['status' => $status]);
