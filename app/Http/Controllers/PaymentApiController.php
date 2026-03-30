@@ -5,21 +5,19 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
-use PayNL\Sdk\Model\Request\OrderCreateRequest;
-use PayNL\Sdk\Model\Request\TransactionStatusRequest;
-use PayNL\Sdk\Config\Config;
-use PayNL\Sdk\Exception\PayException;
+use Mollie\Api\MollieApiClient;
+use Mollie\Api\Exceptions\ApiException;
 
 class PaymentApiController extends Controller
 {
-    private function getConfig(): Config
+    private function getMollieClient(): MollieApiClient
     {
-        $config = new Config();
-        // Username = API Token (AT-####-####)
-        // Password = Token Code (API key)
-        $config->setUsername(config('services.paynl.api_token'));
-        $config->setPassword(config('services.paynl.token_code'));
-        return $config;
+        $mollie = new MollieApiClient();
+        $apiKey = config('services.mollie.use_test')
+            ? config('services.mollie.test_api_key')
+            : config('services.mollie.api_key');
+        $mollie->setApiKey($apiKey);
+        return $mollie;
     }
 
     /**
@@ -33,30 +31,40 @@ class PaymentApiController extends Controller
         ]);
 
         try {
-            // Create order request
-            $payRequest = new OrderCreateRequest();
-            $payRequest->setConfig($this->getConfig());
-            $payRequest->setServiceId(config('services.paynl.service_id'));
-            $payRequest->setAmount((float)$validated['amount']);
-            $payRequest->setReturnurl(route('api.payment.callback'));
-            $payRequest->setDescription($validated['description']);
-            $payRequest->setTestmode(config('services.paynl.test_mode', true));
+            $mollie = $this->getMollieClient();
 
-            // Start the payment
-            $payOrder = $payRequest->start();
+            // Build payment payload
+            $paymentData = [
+                'amount' => [
+                    'value' => number_format($validated['amount'], 2, '.', ''),
+                    'currency' => config('services.mollie.currency', 'EUR'),
+                ],
+                'description' => $validated['description'],
+                'redirectUrl' => route('api.payment.callback'),
+                'locale' => config('services.mollie.locale', 'en_US'),
+            ];
+
+            // Only add webhook URL if not localhost (Mollie can't reach localhost)
+            $webhookUrl = route('api.payment.webhook');
+            if (!str_contains($webhookUrl, '127.0.0.1') && !str_contains($webhookUrl, 'localhost')) {
+                $paymentData['webhookUrl'] = $webhookUrl;
+            }
+
+            // Create payment with Mollie SDK
+            $payment = $mollie->payments->create($paymentData);
 
             // Return payment URL to frontend
             return response()->json([
                 'success' => true,
-                'order_id' => $payOrder->getOrderId(),
-                'payment_url' => $payOrder->getPaymentUrl(),
+                'payment_id' => $payment->id,
+                'payment_url' => $payment->getCheckoutUrl(),
             ], 200);
 
-        } catch (PayException $e) {
+        } catch (ApiException $e) {
             Log::error('Payment API error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Payment error: ' . $e->getFriendlyMessage(),
+                'message' => 'Payment error: ' . $e->getMessage(),
             ], 400);
         } catch (\Exception $e) {
             Log::error('Payment API error: ' . $e->getMessage());
@@ -68,64 +76,57 @@ class PaymentApiController extends Controller
     }
 
     /**
-     * Handle payment callback from Pay.nl (redirect from payment page)
+     * Handle payment callback from Mollie (redirect from payment page)
      */
     public function handleCallback(Request $request)
     {
         try {
-            // PayNL sends 'id' parameter, not 'orderid'
-            $orderId = $request->input('id') ?? $request->input('orderid');
-            $statusCode = $request->input('statusCode');
+            // Mollie sends 'id' parameter in callback
+            $paymentId = $request->input('id');
             
-            if (!$orderId) {
+            if (!$paymentId) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'No order found',
+                    'message' => 'No payment found',
                 ], 400);
             }
 
-            // If statusCode is provided, use it directly
-            if ($statusCode !== null) {
-                $status = (int)$statusCode;
-            } else {
-                // Otherwise, fetch the status from PayNL
-                $statusRequest = new TransactionStatusRequest($orderId);
-                $statusRequest->setConfig($this->getConfig());
-                $transaction = $statusRequest->start();
-                $status = $transaction->getStatusCode();
-            }
+            $mollie = $this->getMollieClient();
+            $payment = $mollie->payments->get($paymentId);
+            $status = $payment->status; // paid, pending, failed, canceled, expired, etc.
 
-            // Status: 100 = Approved, 90 = Pending, 80 = Cancelled, 70 = Denied, etc.
-            if ($status == 100) {
+            // Status values: paid, pending, failed, canceled, expired, expired_pending_payment, etc.
+            if ($status === 'paid') {
                 return response()->json([
                     'success' => true,
                     'message' => 'Payment successful',
-                    'order_id' => $orderId,
+                    'payment_id' => $paymentId,
                     'status' => 'approved',
-                    'status_code' => $status,
+                    'mollie_status' => $status,
                 ], 200);
-            } elseif ($status == 90) {
+            } elseif ($status === 'pending') {
                 return response()->json([
                     'success' => true,
                     'message' => 'Payment pending',
-                    'order_id' => $orderId,
+                    'payment_id' => $paymentId,
                     'status' => 'pending',
-                    'status_code' => $status,
+                    'mollie_status' => $status,
                 ], 200);
             } else {
                 return response()->json([
                     'success' => false,
                     'message' => 'Payment was not completed',
-                    'order_id' => $orderId,
+                    'payment_id' => $paymentId,
                     'status' => 'failed',
-                    'status_code' => $status,
+                    'mollie_status' => $status,
                 ], 400);
             }
 
-        } catch (PayException $e) {
+        } catch (ApiException $e) {
+            Log::error('Payment callback error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Error: ' . $e->getFriendlyMessage(),
+                'message' => 'Error processing payment',
             ], 400);
         } catch (\Exception $e) {
             Log::error('Payment callback error: ' . $e->getMessage());
@@ -146,31 +147,31 @@ class PaymentApiController extends Controller
         ]);
 
         try {
-            $statusRequest = new TransactionStatusRequest($validated['order_id']);
-            $statusRequest->setConfig($this->getConfig());
-
-            $transaction = $statusRequest->start();
-            $status = $transaction->getStatusCode();
+            $mollie = $this->getMollieClient();
+            $payment = $mollie->payments->get($validated['order_id']);
+            $status = $payment->status; // paid, pending, failed, canceled, expired, etc.
 
             $statusMap = [
-                100 => 'approved',
-                90 => 'pending',
-                80 => 'cancelled',
-                70 => 'denied',
+                'paid' => 'approved',
+                'pending' => 'pending',
+                'failed' => 'failed',
+                'canceled' => 'cancelled',
+                'expired' => 'expired',
+                'expired_pending_payment' => 'expired',
             ];
 
             return response()->json([
                 'success' => true,
-                'order_id' => $validated['order_id'],
-                'status_code' => $status,
+                'payment_id' => $validated['order_id'],
                 'status' => $statusMap[$status] ?? 'unknown',
+                'mollie_status' => $status,
             ], 200);
 
-        } catch (PayException $e) {
+        } catch (ApiException $e) {
             Log::error('Payment status check error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Error: ' . $e->getFriendlyMessage(),
+                'message' => 'Error checking payment status',
             ], 400);
         } catch (\Exception $e) {
             Log::error('Payment status check error: ' . $e->getMessage());
@@ -182,30 +183,24 @@ class PaymentApiController extends Controller
     }
 
     /**
-     * Handle webhook from Pay.nl
+     * Handle webhook from Mollie
      */
     public function handleWebhook(Request $request): JsonResponse
     {
         try {
-            // PayNL sends 'id' parameter in webhook, but also check for 'orderid' for compatibility
-            $orderId = $request->input('id') ?? $request->input('orderid');
-            $statusCode = $request->input('statusCode');
+            // Mollie sends 'id' parameter in webhook
+            $paymentId = $request->input('id');
             
-            if ($orderId) {
-                $status = $statusCode ?? null;
+            if ($paymentId) {
+                $mollie = $this->getMollieClient();
+                $payment = $mollie->payments->get($paymentId);
+                $status = $payment->status;
                 
-                if ($status === null) {
-                    $statusRequest = new TransactionStatusRequest($orderId);
-                    $statusRequest->setConfig($this->getConfig());
-                    $transaction = $statusRequest->start();
-                    $status = $transaction->getStatusCode();
-                }
-
                 // Update your database with transaction status
-                // Example: Payment::where('paynl_order_id', $orderId)->update(['status' => $status]);
+                // Example: Payment::where('mollie_payment_id', $paymentId)->update(['status' => $status]);
                 
                 Log::info('Payment webhook received', [
-                    'order_id' => $orderId,
+                    'payment_id' => $paymentId,
                     'status' => $status,
                 ]);
             }

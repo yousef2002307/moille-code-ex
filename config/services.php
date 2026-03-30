@@ -35,14 +35,14 @@ return [
         ],
     ],
 
-    'paynl' => [
-        'api_token' => env('PAYNL_API_TOKEN'),      // Username (AT-code)
-        'secret' => env('PAYNL_SECRET'),             // Password
-        'service_id' => env('PAYNL_SERVICE_ID'),     // Sales location (SL-code)
-        'token_code' => env('PAYNL_TOKEN_CODE'),
-        'test_mode' => env('PAYNL_TEST_MODE', false),
-        'currency' => env('PAYNL_CURRENCY', 'EUR'),
-        'language' => env('PAYNL_LANGUAGE', 'EN'),
+    'mollie' => [
+        'api_key' => env('MOLLIE_API_KEY'),          // Live API key
+        'test_api_key' => env('MOLLIE_TEST_API_KEY'), // Test API key
+        'profile_id' => env('MOLLIE_PROFILE_ID'),    // Profile ID
+        'use_test' => env('MOLLIE_USE_TEST', true),
+        'currency' => env('MOLLIE_CURRENCY', 'EUR'),
+        'locale' => env('MOLLIE_LOCALE', 'en_US'),
+        'webhook_url' => env('MOLLIE_WEBHOOK_URL'),
     ],
 
 ];

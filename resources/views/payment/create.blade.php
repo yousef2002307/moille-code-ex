@@ -99,7 +99,7 @@
             <input type="text" id="description" name="description" placeholder="Order description" required>
         </div>
 
-        <button type="submit">Pay with Pay.nl</button>
+        <button type="submit">Pay with moille</button>
     </form>
 </body>
 </html>
